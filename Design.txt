@@ -1,0 +1,31 @@
+Every new <ipa:ipb:porta:portb> tuple creates a new output file. There
+is  no  check that  this  starts  with a  SYN,  nor  do you  want  one
+generally.
+
+Once a  stream is closed,  all packets using  the same tuple are still
+appended to that stream, unless it is a SYN in which case a new output
+file is opened.
+
+The idea  here is that  even after  a normal connection  teardown, but
+especially  after  a reset,  everything  that  is  not  a SYN  is  (an
+erroneous) part of the old connection. That way, out of order packets,
+hosts, continueing  after a  reset etc, will  still create  one stream
+only which records everything that went wrong with that stream.
+
+Once you accept that after RST or connection teardown a SYN and only a
+SYN will  create a new  connection -- and thus  a new outfile  --, you
+don't  actually  need   to  keep  track  of   connection  teardown  in
+detail. Just seeing one FIN is  enough to mark the connection `closed'
+even  if it  isn't yet.  The whole  (orderly or  unorderly) connection
+teardown will still be recorded correctly  in the old file, because it
+isn't a SYN. In  fact, it makes the splitter much  more resilient to a
+whole class of failure modes,  especially if the capture omits packets
+that were seen by both endpoints (but not by the sniffer).
+
+FOR FUTURE:
+
+Iff  a  full   connection  buildup  is  seen,  it  is   always  a  new
+connection. Otherwise, use  heuristic algorithm above on  receipt of a
+SYN. This would be even more accurate than the current heuristics. For
+now the current heuristics server me fine.
+
