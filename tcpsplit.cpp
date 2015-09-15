@@ -132,9 +132,9 @@ void connection_t::close(const connection_key_t &key) {
 
 void usage(const char* argv0)
 {
-    cerr << "tcpsplit " << version << " (c) 2015 M. Lievaart\n";
-    cerr << "usage: " << argv0 << " [-h] [-v] [-o format] <capfile>\n"
-        "\nformat defaults to '" << outform << "'\n";
+    cerr << "tcpsplit " << version << " (c) 2015 M. Lievaart\n\n";
+    cerr << "usage: " << argv0 << " [-h] [-v] [-o format] <capfile>\n\n"
+        "format defaults to '" << outform << "'\n\n";
     exit(EXIT_FAILURE);
 }
 
