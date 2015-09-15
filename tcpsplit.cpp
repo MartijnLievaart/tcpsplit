@@ -39,7 +39,7 @@ std::string version = "v1.0 (work)"; // still figuring out git and release versi
 int debug;
 int verbose;
 std::string outform("stream-%04d.pcap");   // output format
-int llsize;                                // Link Layer size
+int llsize = -1;                                // Link Layer size
 bool quit;                                 // set from signal handle
 int nopen, maxopen;                        // number of files currently open and max we want to have open
 
@@ -132,6 +132,7 @@ void connection_t::close(const connection_key_t &key) {
 
 void usage(const char* argv0)
 {
+    cerr << "tcpsplit " << version << " (c) 2015 M. Lievaart\n";
     cerr << "usage: " << argv0 << " [-h] [-v] [-o format] <capfile>\n"
         "\nformat defaults to '" << outform << "'\n";
     exit(EXIT_FAILURE);
@@ -164,7 +165,7 @@ int main(int argc, char** argv)
 
     // Get the command line options, if any
     int c;
-    while ((c = getopt (argc, argv, "hvdo:")) != -1)
+    while ((c = getopt (argc, argv, "hvdo:l:")) != -1)
     {
         switch (c)
         {
@@ -176,6 +177,9 @@ int main(int argc, char** argv)
             break;
         case 'o':
             outform = optarg;
+            break;
+        case 'l':
+            llsize = atoi(optarg);
             break;
         case 'h':
         default:
@@ -195,16 +199,18 @@ int main(int argc, char** argv)
         exit(1);
     }
 
-    int linktype = pcap_datalink(infile);
-    switch (linktype) {
-    case DLT_RAW: llsize = 0; break;
-    case DLT_NULL: llsize = 4; break;
-    case DLT_EN10MB: llsize = 14; break;
-    case DLT_LINUX_SLL: llsize = 16; break;
-        std::cerr << "Cannot determine size of link layer, sorry (https://idea.popcount.org/2013-01-29-stripping-layer-2-in-pcap/)\n";
-        exit(1);
+    if (llsize==-1) {
+        int linktype = pcap_datalink(infile);
+        switch (linktype) {
+        case DLT_RAW: llsize = 0; break;
+        case DLT_NULL: llsize = 4; break;
+        case DLT_EN10MB: llsize = 14; break;
+        case DLT_LINUX_SLL: llsize = 16; break;
+            std::cerr << "Cannot determine size of link layer, sorry (https://idea.popcount.org/2013-01-29-stripping-layer-2-in-pcap/)\n";
+            std::cerr << "Use -l <llsize> to force a link layer size\n";
+            exit(1);
+        }
     }
-
 
     struct bpf_program fp;      /* hold compiled program     */
     if (pcap_compile(infile, &fp, "tcp", 1, PCAP_NETMASK_UNKNOWN) == -1) {
