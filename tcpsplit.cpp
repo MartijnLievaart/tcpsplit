@@ -31,17 +31,15 @@ Hereby granting license for reproduction under GPL v2
 #include <sys/resource.h>
 #include <cassert>
 
-using std::cerr;
-
 
 std::string version = "v1.0 (work)"; // still figuring out git and release versioning
 
 int debug;
 int verbose;
-std::string outform("stream-%04d.pcap");   // output format
-int llsize = -1;                                // Link Layer size
-bool quit;                                 // set from signal handle
-int nopen, maxopen;                        // number of files currently open and max we want to have open
+std::string outform("stream-%04d.pcap"); // output format
+int llsize = -1;                         // Link Layer size
+bool quit;                               // set from signal handle
+int nopen, maxopen;                      // number of files currently open and max we want to have open
 
 
 void handle_packet(pcap_t *infile, const pcap_pkthdr *pkt_header, const u_char *pkt_data);
@@ -124,19 +122,26 @@ std::deque<connection_key_t> closed;
 void connection_t::close(const connection_key_t &key) {
     fin_rst = true;
     if (std::find(closed.begin(), closed.end(), key)==closed.end()) {
-        if (debug) cerr << "Pushing on closed: " << key.as_string() << "\n";
+        if (debug) std::cerr << "Pushing on closed: " << key.as_string() << "\n";
         closed.push_back(key);
     }
 }
 
+//
+// Ye olde usage instructions
+//
 
 void usage(const char* argv0)
 {
-    cerr << "tcpsplit " << version << " (c) 2015 M. Lievaart\n\n";
-    cerr << "usage: " << argv0 << " [-h] [-v] [-o format] <capfile>\n\n"
+    std::cerr << "tcpsplit " << version << " (c) 2015 M. Lievaart\n\n";
+    std::cerr << "usage: " << argv0 << " [-h] [-v] [-o format] <capfile>\n\n"
         "format defaults to '" << outform << "'\n\n";
     exit(EXIT_FAILURE);
 }
+
+//
+// Signal handler
+//
 
 void bailout(int signo)
 {
@@ -144,10 +149,10 @@ void bailout(int signo)
 }
 
 //
-// Fun starts here
+// We want as many open files as we can get.
 //
 
-int main(int argc, char** argv)
+void increase_filehandle_limits()
 {
     struct rlimit rlim;
     if (getrlimit(RLIMIT_NOFILE, &rlim)) {
@@ -156,12 +161,27 @@ int main(int argc, char** argv)
     }
 
     rlim.rlim_cur = rlim.rlim_max;
-//    rlim.rlim_cur = 256;
+//    rlim.rlim_cur = 256; // for testing
+
+    // we want slightly less open outputfiles than filehandles to both allow room for
+    // stdin, stdout and stderr, the inputfile  etc.
+
     maxopen = rlim.rlim_cur - 10;
+
     if (setrlimit(RLIMIT_NOFILE, &rlim)) {
         perror("rlimit");
         exit(EXIT_FAILURE);
     }
+}
+
+//
+// Fun starts here
+//
+
+int main(int argc, char** argv)
+{
+
+    increase_filehandle_limits();
 
     // Get the command line options, if any
     int c;
@@ -195,7 +215,7 @@ int main(int argc, char** argv)
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t *infile = pcap_open_offline(fname.c_str(), errbuf);
     if (!infile) {
-        cerr << "Cannot open infile: " << errbuf << std::endl;
+        std::cerr << "Cannot open infile: " << errbuf << std::endl;
         exit(1);
     }
 
@@ -214,13 +234,13 @@ int main(int argc, char** argv)
 
     struct bpf_program fp;      /* hold compiled program     */
     if (pcap_compile(infile, &fp, "tcp", 1, PCAP_NETMASK_UNKNOWN) == -1) {
-        cerr << "Error calling pcap_compile\n";
+        std::cerr << "Error calling pcap_compile\n";
         exit(1);
     }
 
 
     if (pcap_setfilter(infile, &fp) == -1) {
-        cerr << "Error calling pcap_setfilter\n";
+        std::cerr << "Error calling pcap_setfilter\n";
         exit(1);
     }
 
@@ -274,7 +294,7 @@ void handle_packet(pcap_t *infile, const pcap_pkthdr *pkt_header, const u_char *
         return;
     }
 
-    const tcphdr *tcphdr_ = reinterpret_cast<const tcphdr*>(pkt_data+llsize+sizeof(iphdr)); // bloody stupid type names in tcp.h 
+    const tcphdr *tcphdr_ = reinterpret_cast<const tcphdr*>(pkt_data+llsize+sizeof(iphdr)); // bloody stupid type names in tcp.h
 
     connection_key_t key = {
         iphdr_->saddr,
@@ -294,22 +314,19 @@ void handle_packet(pcap_t *infile, const pcap_pkthdr *pkt_header, const u_char *
 
     connection_t *conn;
 
-    // FIXME: SYN means new file if previous stream signaled closed or reset
     auto it = conninfo.find(key);
     if (it==conninfo.end()) {
         conn = &(conninfo.insert(std::make_pair(key, connection_t(open_new_outfile(infile)))).first->second);
-        if (debug) cerr << "Opened new outfile for " << key.as_string() << "\n";
+        if (debug) std::cerr << "Opened outfile for " << key.as_string() << "\n";
     } else {
-        // There seems to be a connection, but maybe it is just reusing the same key
         conn = &(it->second);
+        // There seems to be a connection. If this packet is a SYN and the connection seems
+        // closed, open a new file. Otherwise, we've found the correct connection.
         if (tcphdr_->syn && conn->fin_rst) {
             pcap_dump_close(conn->outfile);
-            connection_t newconn = connection_t(open_new_outfile(infile));
-            it->second = newconn;
-//            auto it = conninfo.find(key);
-//            assert(it!=conninfo.end());
+            it->second = connection_t(open_new_outfile(infile));
             conn = &(it->second);
-            if (debug) cerr << "Opened new outfile for reused connection " << key.as_string() << "\n";
+            if (debug) std::cerr << "Opened new outfile for reused connection " << key.as_string() << "\n";
         }
     }
 
@@ -321,37 +338,45 @@ void handle_packet(pcap_t *infile, const pcap_pkthdr *pkt_header, const u_char *
     }
 }
 
+
+//
+// Open a new pcap output file.
+//
+// Normally, we just open a new file. However, if we are running low on filehandles
+// we first close the oldest file which has seen a FIN or RST.
+//
 unsigned curn=0;
 pcap_dumper_t *open_new_outfile(pcap_t *infile)
 {
-    if (debug) cerr << "Opening new dumpfile (" << nopen << ")\n";
+    if (debug) std::cerr << "Opening new dumpfile (" << nopen << ")\n";
     if (nopen>=maxopen) {
-        if (debug) cerr << "Closing some file\n";
+        if (debug) std::cerr << "Closing some file\n";
         if (closed.size()) {
             connection_key_t key = closed.front();
             closed.pop_front();
             auto it = conninfo.find(key);
             if (it==conninfo.end()) {
-                cerr << key.as_string();
+                std::cerr << key.as_string();
                 assert(it!=conninfo.end());
             }
-            if (debug) cerr << "Closing " << it->second.outfile << "\n";
+            if (debug) std::cerr << "Closing " << it->second.outfile << "\n";
             pcap_dump_close(it->second.outfile);
             assert(conninfo.erase(key));
+            nopen--;
         } else {
-            cerr << "No file to close. Will probably soon run out of filehandles.\n";
+            std::cerr << "No file to close. Will probably soon run out of filehandles.\n";
             // almost no file handles left but no closed connections yet.
             // havoc will probably ensue, but maybe some stream will close before
-            // we are really out of handles
-            // so continue, cross fingers and hope for the best
+            // we are really out of handles.
+            // So continue, cross fingers, hope for the best and think of England.
         }
-    } else
-        nopen++;
+    }
 
+    nopen++;
     char fname[1024];
     snprintf(fname, sizeof(fname), outform.c_str(), curn++);
     pcap_dumper_t *outfile = pcap_dump_open(infile, fname);
-    if (debug)     cerr << "Opened " << outfile << "\n";
+    if (debug)     std::cerr << "Opened " << outfile << "\n";
     if (!outfile) {
         pcap_perror(infile, (char*)"Cannot open outfile: "); // bloody const error in pcap interface
         exit(1);
