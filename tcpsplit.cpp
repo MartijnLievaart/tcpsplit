@@ -4,7 +4,7 @@ This is too simple to go full blown C++, but I need a map so I cannot do it in C
 Hence C like C++. Not my clearest program ever.
 
 Also, I want this to be a simple copy-and-run executable. C++ libs can be assumed,
-but Net::Ppac not, so perl is out as well.
+but Net::Pcap not, so perl is out as well.
 
 (C) 2015 M. Lievaart
 
@@ -33,32 +33,43 @@ Hereby granting license for reproduction under GPL v2
 
 using std::cerr;
 
+
+std::string version = "v1.0 (work)"; // still figuring out git and release versioning
+
 int debug;
 int verbose;
-std::string outform("stream-%04d.pcap");
-int llsize; // Link Layer size
-bool quit;
-int nopen, maxopen;
-long npkt;
+std::string outform("stream-%04d.pcap");   // output format
+int llsize;                                // Link Layer size
+bool quit;                                 // set from signal handle
+int nopen, maxopen;                        // number of files currently open and max we want to have open
+
 
 void handle_packet(pcap_t *infile, const pcap_pkthdr *pkt_header, const u_char *pkt_data);
 pcap_dumper_t *open_new_outfile(pcap_t *infile);
 
+//
+// host order uint32 to dotted ip address
+//
 
 std::string uint2ipaddress(u_int32_t x)
 {
     char buf[16];
     sprintf(buf, "%d.%d.%d.%d", (x >> 24), ((x >> 16) & 0xff), ((x >> 8) & 0xff), (x & 0xff));
-    return buf; 
+    return buf;
 }
 
+//
+// Class that represents a connection tuple and thus is a key-value for the connection
+//
 
 struct connection_key_t {
     u_int32_t saddr;
     u_int32_t daddr;
     u_int16_t sport;
 	u_int16_t dport;
-    std::string as_string() {
+
+    // FIX ME? overload <<
+    std::string as_string() const {
         std::stringstream str;
         str << "{" << uint2ipaddress(ntohl(this->saddr)) << ":"
             << uint2ipaddress(ntohl(this->daddr)) << ":"
@@ -66,19 +77,6 @@ struct connection_key_t {
             << ntohs(this->dport) << "}";
         return str.str();
     }
-};
-
-
-
-struct connection_t {
-    pcap_dumper_t *outfile;
-    u_int32_t first_fin, second_fin, first_fin_seq, second_fin_seq;
-    bool closed1, closed2, closed; // halfclosed from source, halfclosed from dest, closed from both
-    connection_t(pcap_dumper_t *of) 
-        : outfile(of), first_fin(0), first_fin_seq(0), second_fin_seq(0), second_fin(0),
-          closed1(0), closed2(0), closed(0) {}
-    bool close1() { closed1=true; return closed = closed2; }
-    bool close2() { closed2=true; return closed = closed1; }
 };
 
 bool operator<(const connection_key_t a, const connection_key_t b) {
@@ -92,8 +90,44 @@ bool operator==(const connection_key_t a, const connection_key_t b) {
     return a.saddr==b.saddr && a.daddr==b.daddr && a.sport==b.sport && a.dport==b.dport;
 }
 
-std::map<connection_key_t, connection_t> outfiles;
+
+//
+// all information we keep on a connection
+//
+
+struct connection_t {
+    pcap_dumper_t *outfile;
+    bool fin_rst; // a FIN or RST has been seen, so next SYN is a new connection
+
+    connection_t(pcap_dumper_t *of) 
+        : outfile(of), fin_rst(false) {}
+
+    void close(const connection_key_t &);
+};
+
+//
+// Info on the connections we are currently processing
+//
+std::map<connection_key_t, connection_t> conninfo;
+
+//
+// These connections are supposedly dead and their filehandles
+// can be reused when we run out of filehandles.
+//
+// Note that connections on `closed' are also on `conninfo', which
+// is more or less the whole idea, to know which connections we can
+// reuse and in which order
+//
 std::deque<connection_key_t> closed;
+
+
+void connection_t::close(const connection_key_t &key) {
+    fin_rst = true;
+    if (std::find(closed.begin(), closed.end(), key)==closed.end()) {
+        if (debug) cerr << "Pushing on closed: " << key.as_string() << "\n";
+        closed.push_back(key);
+    }
+}
 
 
 void usage(const char* argv0)
@@ -107,6 +141,10 @@ void bailout(int signo)
 {
     quit = true;
 }
+
+//
+// Fun starts here
+//
 
 int main(int argc, char** argv)
 {
@@ -192,7 +230,7 @@ int main(int argc, char** argv)
         handle_packet(infile, pkt_header, pkt_data);
     }
 
-    for (auto it = outfiles.begin(); it != outfiles.end(); it++) {
+    for (auto it = conninfo.begin(); it != conninfo.end(); it++) {
         pcap_dump_close(it->second.outfile);
     }
 
@@ -230,8 +268,6 @@ void handle_packet(pcap_t *infile, const pcap_pkthdr *pkt_header, const u_char *
         return;
     }
 
-    npkt++;
-
     const tcphdr *tcphdr_ = reinterpret_cast<const tcphdr*>(pkt_data+llsize+sizeof(iphdr)); // bloody stupid type names in tcp.h 
 
     connection_key_t key = {
@@ -253,19 +289,19 @@ void handle_packet(pcap_t *infile, const pcap_pkthdr *pkt_header, const u_char *
     connection_t *conn;
 
     // FIXME: SYN means new file if previous stream signaled closed or reset
-    auto it = outfiles.find(key);
-    if (it==outfiles.end()) {
-        conn = &(outfiles.insert(std::make_pair(key, connection_t(open_new_outfile(infile)))).first->second);
+    auto it = conninfo.find(key);
+    if (it==conninfo.end()) {
+        conn = &(conninfo.insert(std::make_pair(key, connection_t(open_new_outfile(infile)))).first->second);
         if (debug) cerr << "Opened new outfile for " << key.as_string() << "\n";
     } else {
         // There seems to be a connection, but maybe it is just reusing the same key
         conn = &(it->second);
-        if (tcphdr_->syn && conn->closed) {
+        if (tcphdr_->syn && conn->fin_rst) {
             pcap_dump_close(conn->outfile);
             connection_t newconn = connection_t(open_new_outfile(infile));
             it->second = newconn;
-//            auto it = outfiles.find(key);
-//            assert(it!=outfiles.end());
+//            auto it = conninfo.find(key);
+//            assert(it!=conninfo.end());
             conn = &(it->second);
             if (debug) cerr << "Opened new outfile for reused connection " << key.as_string() << "\n";
         }
@@ -274,38 +310,8 @@ void handle_packet(pcap_t *infile, const pcap_pkthdr *pkt_header, const u_char *
     // Write packet to the right file
     pcap_dump((u_char*)conn->outfile, pkt_header, pkt_data);
 
-    // Does this (half) close the file?
-    // FIXME: Keep track of reset as well
-    if (tcphdr_->fin) {
-        if (!conn->first_fin) {
-            conn->first_fin = iphdr_->saddr;
-            conn->first_fin_seq = htonl(tcphdr_->seq);
-        } else if (conn->first_fin != iphdr_->saddr) {
-            conn->second_fin = iphdr_->saddr;
-            conn->second_fin_seq = htonl(tcphdr_->seq);
-        }
-    } else if (conn->second_fin==iphdr_->daddr && tcphdr_->ack && ntohl(tcphdr_->ack_seq)==conn->second_fin_seq+1) {
-        if (conn->close2()) {
-//            if (key.as_string()=="{10.12.14.131:172.21.176.76:50953:9100}")
-//                for_each(closed.begin(), closed.end(), [](connection_key_t&k) {
-//                        cerr << k.as_string() << "\n";
-//                    });
-            if (std::find(closed.begin(), closed.end(), key)==closed.end()) {
-                if (debug) cerr << "Pushing on closed: " << key.as_string() << "\n";
-                closed.push_back(key);
-            }
-        }
-    } else if (conn->first_fin==iphdr_->daddr && tcphdr_->ack && ntohl(tcphdr_->ack_seq)==conn->first_fin_seq+1) {
-        if (conn->close1()) {
-//            if (key.as_string()=="{10.12.14.131:172.21.176.76:50953:9100}")
-//                for_each(closed.begin(), closed.end(), [](connection_key_t&k) {
-//                        cerr << k.as_string() << "\n";
-//                    });
-            if (std::find(closed.begin(), closed.end(), key)==closed.end()) {
-                if (debug) cerr << "Pushing on closed: " << key.as_string() << "\n";
-                closed.push_back(key);
-            }
-        }
+    if (tcphdr_->fin || tcphdr_->rst) {
+        conn->close(key);
     }
 }
 
@@ -318,14 +324,14 @@ pcap_dumper_t *open_new_outfile(pcap_t *infile)
         if (closed.size()) {
             connection_key_t key = closed.front();
             closed.pop_front();
-            auto it = outfiles.find(key);
-            if (it==outfiles.end()) {
+            auto it = conninfo.find(key);
+            if (it==conninfo.end()) {
                 cerr << key.as_string();
-                assert(it!=outfiles.end());
+                assert(it!=conninfo.end());
             }
             if (debug) cerr << "Closing " << it->second.outfile << "\n";
             pcap_dump_close(it->second.outfile);
-            assert(outfiles.erase(key));
+            assert(conninfo.erase(key));
         } else {
             cerr << "No file to close. Will probably soon run out of filehandles.\n";
             // almost no file handles left but no closed connections yet.

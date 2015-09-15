@@ -1,0 +1,9 @@
+# tcpsplit
+A tool to split a pcap file into seperate tcp streams.
+
+This  tool aimes  to  do one  job  right, split  a  capture file  into
+different tcp streams.
+
+One goal was to create as little dependencies as practical, so it's as
+easy as possible ot  deploy.  It's written in C++ so  it needs the C++
+RTL and obviously it needs libpcap. But that is it.
